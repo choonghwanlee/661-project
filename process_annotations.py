@@ -81,6 +81,6 @@ def make_image_mask(mask_array, image_path):
     im.save(image_path)
 
 
-masks = get_masks("./brown-eye.json", ["iris", "pupil"])
-make_image_mask(masks["iris"][0], "iris_mask.jpg")
-make_image_mask(masks["pupil"][0], "pupil_mask.png")
+# masks = get_masks("./brown-eye.json", ["iris", "pupil"])
+# make_image_mask(masks["iris"][0], "iris_mask.jpg")
+# make_image_mask(masks["pupil"][0], "pupil_mask.png")
