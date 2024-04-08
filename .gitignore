@@ -1,2 +1,5 @@
 images/*
 env
+videos/
+train_data/
+.DS_Store

@@ -24,3 +24,16 @@ def extract_frames(video, name):
             i = int(msec)
             cv2.imwrite(f"./images/{name}_{i}.jpg", frame)
     cap.release()
+
+
+def extract_many(files):
+    for f in files:
+        extract_frames(f"./videos/{f}.mp4", f)
+
+
+train_files = ["aden_lefteye", "aden_righteye", "christian_lefteye", "cindy_lefteye", "cindy_righteye", 
+                "dillon_lefteye", "dillon_righteye", "holly_righteye", "jason_lefteye", "jason_righteye"]
+test_files = ["christian_righteye", "holly_lefteye"]
+
+# extract_many(train_files)
+# extract_many(test_files)
