@@ -72,8 +72,8 @@ for item in lst:
 """
 def load_npz_data(filepath):
     data = np.load(filepath)
-    print(type(data))
-    print(data)
+    # print(type(data))
+    # print(data)
     # lst = data.files
 
     return data

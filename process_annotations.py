@@ -49,19 +49,37 @@ def get_masks(filepath, mask_objects):
     annotations = data["annotations"]
     masks = {}
 
-    for item in annotations:
-        if item["name"] in mask_objects:
-            name = item["name"]
-            path = item["polygon"]["paths"][0]
-            arr = []
-            for pt in path:
-                arr.append((pt["x"], pt["y"]))
+    if data["item"]["slots"][0]["type"] == "video":
+        frames = annotations["frames"]
+        
+        for frame in frames:
+            if item["name"] in mask_objects:
+                name = item["name"]
+                path = item["polygon"]["paths"][0]
+                arr = []
+                for pt in path:
+                    arr.append((pt["x"], pt["y"]))
 
-            nparr = np.array(arr)
+                nparr = np.array(arr)
 
-            if name not in masks:
-                masks[name] = []
-            masks[name].append(points_inside_polygon(nparr, width, height))
+                if name not in masks:
+                    masks[name] = []
+                masks[name].append(points_inside_polygon(nparr, width, height))
+    
+    else:
+        for item in annotations:
+            if item["name"] in mask_objects:
+                name = item["name"]
+                path = item["polygon"]["paths"][0]
+                arr = []
+                for pt in path:
+                    arr.append((pt["x"], pt["y"]))
+
+                nparr = np.array(arr)
+
+                if name not in masks:
+                    masks[name] = []
+                masks[name].append(points_inside_polygon(nparr, width, height))
 
     f.close()
     return masks
@@ -81,6 +99,9 @@ def make_image_mask(mask_array, image_path):
     im.save(image_path)
 
 
+masks = get_masks('./videos_json/christian_lefteye.json', ['iris','pupil'])
 # masks = get_masks("./brown-eye.json", ["iris", "pupil"])
-# make_image_mask(masks["iris"][0], "iris_mask.jpg")
-# make_image_mask(masks["pupil"][0], "pupil_mask.png")
+for mask in masks:
+    # print(mask)
+    make_image_mask(mask["iris"][0], f"{mask}_iris_mask.jpg")
+    make_image_mask(masks["pupil"][0], f"{mask}_pupil_mask.png")
