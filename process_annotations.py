@@ -28,6 +28,20 @@ def points_inside_polygon(poly_points, w, h):
     
     return mask
 
+def points_inside_circle(center, radius, w, h):
+    # Create a matplotlib path object using the polygon points
+    path = mpltPath.Path([(0, 0)])
+    circle = path.circle(center, radius)
+    
+    # Initialize an empty mask
+    mask = np.zeros((h, w))
+
+    for i in range(h):
+        for j in range(w):
+            mask[i][j] = 255 if circle.contains_point((j, i)) else 0
+    
+    return mask
+
 
 """
 Creates nparray representations of masks of the desired objects in the given json file
@@ -52,16 +66,28 @@ def get_masks(filepath, mask_objects):
     for item in annotations:
         if item["name"] in mask_objects:
             name = item["name"]
-            path = item["polygon"]["paths"][0]
-            arr = []
-            for pt in path:
-                arr.append((pt["x"], pt["y"]))
+            if "polygon" in item:
+                path = item["polygon"]["paths"][0]
+                arr = []
+                for pt in path:
+                    arr.append((pt["x"], pt["y"]))
 
-            nparr = np.array(arr)
+                nparr = np.array(arr)
 
-            if name not in masks:
-                masks[name] = []
-            masks[name].append(points_inside_polygon(nparr, width, height))
+                if name not in masks:
+                    masks[name] = []
+                masks[name].append(points_inside_polygon(nparr, width, height))
+
+            elif "ellipse" in item:
+                print("ellipse!!")
+                ellipse = item["ellipse"]
+                c = (ellipse["center"]["x"], ellipse["center"]["y"])
+                r = (ellipse["radius"]["x"]+ ellipse["radius"]["y"]) / 2
+                print(f"radius: {r}")
+
+                if name not in masks:
+                    masks[name] = []
+                masks[name].append(points_inside_circle(c, r, width, height))
 
     f.close()
     return masks
@@ -81,6 +107,22 @@ def make_image_mask(mask_array, image_path):
     im.save(image_path)
 
 
-# masks = get_masks("./brown-eye.json", ["iris", "pupil"])
+# masks = get_masks("./christian_righteye_66.json", ["iris", "pupil"])
 # make_image_mask(masks["iris"][0], "iris_mask.jpg")
 # make_image_mask(masks["pupil"][0], "pupil_mask.png")
+
+"""
+example usage 
+
+directory = "json_files"
+
+for filename in os.listdir(directory):
+    f = os.path.join(directory, filename)
+    if os.path.isfile(f):
+        masks = get_masks(f"./{f}", ["iris", "pupil"])
+        name = filename.split(".")[0]
+        if "iris" in masks:
+            make_image_mask(masks["iris"][0], f"./masks/iris/{name}_iris.png")
+        if "pupil" in masks:
+            make_image_mask(masks["pupil"][0], f"./masks/pupil/{name}_pupil.png")
+"""
