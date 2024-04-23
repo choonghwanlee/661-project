@@ -28,6 +28,20 @@ def points_inside_polygon(poly_points, w, h):
     
     return mask
 
+def points_inside_circle(center, radius, w, h):
+    # Create a matplotlib path object using the polygon points
+    path = mpltPath.Path([(0, 0)])
+    circle = path.circle(center, radius)
+    
+    # Initialize an empty mask
+    mask = np.zeros((h, w))
+
+    for i in range(h):
+        for j in range(w):
+            mask[i][j] = 255 if circle.contains_point((j, i)) else 0
+    
+    return mask
+
 
 """
 Creates nparray representations of masks of the desired objects in the given json file
@@ -47,40 +61,48 @@ def get_masks(filepath, mask_objects):
     width = data["item"]["slots"][0]["width"]
     height = data["item"]["slots"][0]["height"]
     annotations = data["annotations"]
+    recording_type = data["item"]["slots"][0]["type"]
     masks = {}
 
-    if data["item"]["slots"][0]["type"] == "video":
-        frames = annotations["frames"]
-        
-        for frame in frames:
-            if item["name"] in mask_objects:
-                name = item["name"]
-                path = item["polygon"]["paths"][0]
-                arr = []
-                for pt in path:
-                    arr.append((pt["x"], pt["y"]))
-
-                nparr = np.array(arr)
-
+    if recording_type == 'video': ## images annotated through video annotation tool
+        for item in annotations: 
+            name = item['name']
+            frame_range = item['ranges'][0]
+            frames = item['frames']
+            for id, value in frames.items(): ## loop over frame key
+                ellipse = value['ellipse']
+                c = (ellipse["center"]["x"], ellipse["center"]["y"])
+                r = (ellipse["radius"]["x"]+ ellipse["radius"]["y"]) / 2
+                print(f"radius: {r}")
                 if name not in masks:
                     masks[name] = []
-                masks[name].append(points_inside_polygon(nparr, width, height))
-    
-    else:
+                masks[name].append(points_inside_circle(c, r, width, height))
+    else: ## images annotated frame by frame
         for item in annotations:
             if item["name"] in mask_objects:
                 name = item["name"]
-                path = item["polygon"]["paths"][0]
-                arr = []
-                for pt in path:
-                    arr.append((pt["x"], pt["y"]))
+                if "polygon" in item:
+                    path = item["polygon"]["paths"][0]
+                    arr = []
+                    for pt in path:
+                        arr.append((pt["x"], pt["y"]))
 
-                nparr = np.array(arr)
+                    nparr = np.array(arr)
 
-                if name not in masks:
-                    masks[name] = []
-                masks[name].append(points_inside_polygon(nparr, width, height))
+                    if name not in masks:
+                        masks[name] = []
+                    masks[name].append(points_inside_polygon(nparr, width, height))
 
+                elif "ellipse" in item:
+                    print("ellipse!!")
+                    ellipse = item["ellipse"]
+                    c = (ellipse["center"]["x"], ellipse["center"]["y"])
+                    r = (ellipse["radius"]["x"]+ ellipse["radius"]["y"]) / 2
+                    print(f"radius: {r}")
+
+                    if name not in masks:
+                        masks[name] = []
+                    masks[name].append(points_inside_circle(c, r, width, height))
     f.close()
     return masks
 
@@ -99,9 +121,35 @@ def make_image_mask(mask_array, image_path):
     im.save(image_path)
 
 
-masks = get_masks('./videos_json/christian_lefteye.json', ['iris','pupil'])
-# masks = get_masks("./brown-eye.json", ["iris", "pupil"])
-for mask in masks:
-    # print(mask)
-    make_image_mask(mask["iris"][0], f"{mask}_iris_mask.jpg")
-    make_image_mask(masks["pupil"][0], f"{mask}_pupil_mask.png")
+# masks = get_masks("./christian_righteye_66.json", ["iris", "pupil"])
+# make_image_mask(masks["iris"][0], "iris_mask.jpg")
+# make_image_mask(masks["pupil"][0], "pupil_mask.png")
+
+"""
+example usage 
+
+directory = "json_files"
+
+for filename in os.listdir(directory):
+    f = os.path.join(directory, filename)
+    if os.path.isfile(f):
+        masks = get_masks(f"./{f}", ["iris", "pupil"])
+        name = filename.split(".")[0]
+        if "iris" in masks:
+            make_image_mask(masks["iris"][0], f"./masks/iris/{name}_iris.png")
+        if "pupil" in masks:
+            make_image_mask(masks["pupil"][0], f"./masks/pupil/{name}_pupil.png")
+"""
+
+directory = "json_files"
+
+for filename in os.listdir(directory):
+    f = os.path.join(directory, filename)
+    if os.path.isfile(f):
+        masks = get_masks(f"./{f}", ["iris", "pupil"])
+        name = filename.split(".")[0]
+        if "iris" in masks:
+            [make_image_mask(mask, f"./masks/iris/{name}_{index}_iris.png") for index, mask in enumerate(masks['iris'])]
+        if "pupil" in masks:
+            [make_image_mask(mask, f"./masks/pupil/{name}_{index}_pupil.png") for index, mask in enumerate(masks['pupil'])]
+

@@ -52,6 +52,8 @@ class SAMDataset(Dataset):
     return inputs
 
 def fine_tune(images, pred_masks, mode='iris'):
+    ## images: np array of images 
+    ## pred_masks: np array of masks
     data_dic = create_dataset(images, pred_masks)
     # Initialize the processor
     processor = SamProcessor.from_pretrained("dhkim2810/MobileSAM")
@@ -132,4 +134,3 @@ def get_point_prompt(mask):
     center_row = np.mean(rows)
     center_col = np.mean(cols)
     return [center_row, center_col]
-

@@ -1,8 +1,10 @@
 images/*
 env
 videos/
-train_data/
 .DS_Store
+json_files/
+masks/
+test_images/
+npz_files/
+raw_videos/
 images/
-gangloooooon/
-videos_json/

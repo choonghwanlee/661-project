@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 from PIL import Image
+import os
 
 
 """
@@ -14,12 +15,9 @@ Returns:
 """
 def image_to_np(filepath):
     #using opencv
+    print(filepath)
     img = cv2.cvtColor(cv2.imread(filepath), cv2.COLOR_BGR2RGB)
     nparray_cv2 = np.asarray(img)
-    
-    #using pillow
-    # image = Image.open(filename)
-    # nparray_pil = np.asarray(image)
 
     return nparray_cv2
 
@@ -72,13 +70,61 @@ for item in lst:
 """
 def load_npz_data(filepath):
     data = np.load(filepath)
-    # print(type(data))
-    # print(data)
-    # lst = data.files
 
     return data
 
-# test_arrays = []
-# for i in range(3):
-#     arr = np.array([[i, i, i], [i, i, i], [i, i, i]])
-#     test_arrays.append(arr)
+"""
+code to turn images, test images, and both of the test masks to npz files
+
+dir00 = "./images" ## images that are unlabelled
+dir0 = "./test_images" 
+dir1 = "./masks/iris"
+dir2 = "./masks/pupil"
+np_arrays_train_images = []
+np_arrays_images = []
+np_arrays_iris = []
+np_arrays_pupil = []
+
+for filename in os.listdir(dir00):
+    f = os.path.join(dir00, filename)
+    # checking if it is a file
+    if os.path.isfile(f) and filename != ".DS_Store":
+        np_arrays_train_images.append(image_to_np(f))
+                         
+np.savez_compressed("./train_data/unlabelled/images", images=np_arrays_train_images)
+
+for filename in os.listdir(dir0):
+    f = os.path.join(dir0, filename)
+    # checking if it is a file
+    if os.path.isfile(f) and filename != ".DS_Store":
+        np_arrays_images.append(image_to_np(f))
+                         
+np.savez_compressed("./train_data/labeled/images", images=np_arrays_images)
+
+for filename in os.listdir(dir1):
+    f = os.path.join(dir1, filename)
+    # checking if it is a file
+    if os.path.isfile(f) and filename != ".DS_Store":
+        np_arrays_iris.append(image_to_np(f))
+                         
+np.savez("./train_data/labeled/iris", np_arrays_iris)
+
+print("/n/n SAVED /n/n")
+
+for filename in os.listdir(dir2):
+    f = os.path.join(dir2, filename)
+    # checking if it is a file
+    if os.path.isfile(f) and filename != ".DS_Store":
+        np_arrays_pupil.append(image_to_np(f))
+                         
+np.savez_compressed("./train_data/labeled/masks", iris=np_arrays_iris, pupil=np_arrays_pupil)
+
+idk = load_npz_data("./train_data/labeled/masks.npz")
+image = Image.fromarray(idk["iris"][0])
+other = load_npz_data("./train_data/labeled/images.npz")
+im = Image.fromarray(other["images"][0])
+
+image.save("./testiris.png")
+im.save("./testimage.png")
+
+"""
