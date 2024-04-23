@@ -42,6 +42,20 @@ def points_inside_circle(center, radius, w, h):
     
     return mask
 
+def points_inside_circle(center, radius, w, h):
+    # Create a matplotlib path object using the polygon points
+    path = mpltPath.Path([(0, 0)])
+    circle = path.circle(center, radius)
+    
+    # Initialize an empty mask
+    mask = np.zeros((h, w))
+
+    for i in range(h):
+        for j in range(w):
+            mask[i][j] = 255 if circle.contains_point((j, i)) else 0
+    
+    return mask
+
 
 """
 Creates nparray representations of masks of the desired objects in the given json file
@@ -61,34 +75,48 @@ def get_masks(filepath, mask_objects):
     width = data["item"]["slots"][0]["width"]
     height = data["item"]["slots"][0]["height"]
     annotations = data["annotations"]
+    recording_type = data["item"]["slots"][0]["type"]
     masks = {}
 
-    for item in annotations:
-        if item["name"] in mask_objects:
-            name = item["name"]
-            if "polygon" in item:
-                path = item["polygon"]["paths"][0]
-                arr = []
-                for pt in path:
-                    arr.append((pt["x"], pt["y"]))
-
-                nparr = np.array(arr)
-
-                if name not in masks:
-                    masks[name] = []
-                masks[name].append(points_inside_polygon(nparr, width, height))
-
-            elif "ellipse" in item:
-                print("ellipse!!")
-                ellipse = item["ellipse"]
+    if recording_type == 'video': ## images annotated through video annotation tool
+        for item in annotations: 
+            name = item['name']
+            frame_range = item['ranges'][0]
+            frames = item['frames']
+            for id, value in frames.items(): ## loop over frame key
+                ellipse = value['ellipse']
                 c = (ellipse["center"]["x"], ellipse["center"]["y"])
                 r = (ellipse["radius"]["x"]+ ellipse["radius"]["y"]) / 2
                 print(f"radius: {r}")
-
                 if name not in masks:
                     masks[name] = []
                 masks[name].append(points_inside_circle(c, r, width, height))
+    else: ## images annotated frame by frame
+        for item in annotations:
+            if item["name"] in mask_objects:
+                name = item["name"]
+                if "polygon" in item:
+                    path = item["polygon"]["paths"][0]
+                    arr = []
+                    for pt in path:
+                        arr.append((pt["x"], pt["y"]))
 
+                    nparr = np.array(arr)
+
+                    if name not in masks:
+                        masks[name] = []
+                    masks[name].append(points_inside_polygon(nparr, width, height))
+
+                elif "ellipse" in item:
+                    print("ellipse!!")
+                    ellipse = item["ellipse"]
+                    c = (ellipse["center"]["x"], ellipse["center"]["y"])
+                    r = (ellipse["radius"]["x"]+ ellipse["radius"]["y"]) / 2
+                    print(f"radius: {r}")
+
+                    if name not in masks:
+                        masks[name] = []
+                    masks[name].append(points_inside_circle(c, r, width, height))
     f.close()
     return masks
 
@@ -126,3 +154,15 @@ for filename in os.listdir(directory):
         if "pupil" in masks:
             make_image_mask(masks["pupil"][0], f"./masks/pupil/{name}_pupil.png")
 """
+
+directory = "json_files"
+
+for filename in os.listdir(directory):
+    f = os.path.join(directory, filename)
+    if os.path.isfile(f):
+        masks = get_masks(f"./{f}", ["iris", "pupil"])
+        name = filename.split(".")[0]
+        if "iris" in masks:
+            [make_image_mask(mask, f"./masks/iris/{name}_{index}_iris.png") for index, mask in enumerate(masks['iris'])]
+        if "pupil" in masks:
+            [make_image_mask(mask, f"./masks/pupil/{name}_{index}_pupil.png") for index, mask in enumerate(masks['pupil'])]

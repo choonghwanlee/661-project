@@ -2,6 +2,7 @@ import numpy as np
 import cv2
 from PIL import Image
 import os
+import os
 
 
 """
@@ -71,6 +72,7 @@ def load_npz_data(filepath):
     return data
 
 
+<<<<<<< HEAD
 """
 #code to turn images, test images, and both of the test masks to npz files
 
