@@ -42,6 +42,20 @@ def points_inside_circle(center, radius, w, h):
     
     return mask
 
+def points_inside_circle(center, radius, w, h):
+    # Create a matplotlib path object using the polygon points
+    path = mpltPath.Path([(0, 0)])
+    circle = path.circle(center, radius)
+    
+    # Initialize an empty mask
+    mask = np.zeros((h, w))
+
+    for i in range(h):
+        for j in range(w):
+            mask[i][j] = 255 if circle.contains_point((j, i)) else 0
+    
+    return mask
+
 
 """
 Creates nparray representations of masks of the desired objects in the given json file
@@ -152,4 +166,3 @@ for filename in os.listdir(directory):
             [make_image_mask(mask, f"./masks/iris/{name}_{index}_iris.png") for index, mask in enumerate(masks['iris'])]
         if "pupil" in masks:
             [make_image_mask(mask, f"./masks/pupil/{name}_{index}_pupil.png") for index, mask in enumerate(masks['pupil'])]
-
