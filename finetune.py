@@ -1,82 +1,92 @@
 import numpy as np
-import matplotlib.pyplot as plt
 from datasets import Dataset
 import cv2
-from PIL import Image
-from transformers import SamProcessor
-from torch.utils.data import Dataset
+from PIL import Image, ImageOps, ImageFilter
+from transformers import SamProcessor, SamConfig, SamModel
+import torchvision.transforms as transforms
+import torch
+from torch.utils.data import Dataset as TorchDataset
 from torch.utils.data import DataLoader
-from transformers import SamModel
 from torch.optim import Adam
+import torch.nn.functional as F
+from typing import Tuple
 import monai
 from tqdm import tqdm
-from statistics import mean
-import torch
-from torch.nn.functional import threshold, normalize
 
 
-class SAMDataset(Dataset):
-  """
-  This class is used to create a dataset that serves input images and masks.
-  It takes a dataset and a processor as input and overrides the __len__ and __getitem__ methods of the Dataset class.
-  """
-  def __init__(self, dataset, processor, task = 'iris'):
-    self.dataset = dataset
-    self.processor = processor
-    self.type = task
+class SAMDataset(TorchDataset):
+    """
+    This class is used to create a dataset that serves input images and masks.
+    It takes a dataset and a processor as input and overrides the __len__ and __getitem__ methods of the Dataset class.
+    """
+    def __init__(self, dataset, processor, transform = None, task = 'iris'):
+        self.dataset = dataset
+        self.processor = processor
+        self.transform = transform
+        self.type = task
 
-  def __len__(self):
-    return len(self.dataset)
+    def __len__(self):
+        return len(self.dataset)
 
-  def __getitem__(self, idx):
-    item = self.dataset[idx]
-    image = item["image"]
-    width, height = image.size
-    ground_truth_mask = np.array(item["label"])
+    def __getitem__(self, idx):
+        item = self.dataset[idx]
+        image = item["image"]
+        width, height = image.size
+        ground_truth_mask = np.array(item["label"])
 
-    # get iris box prompt or 
-    prompt = get_bounding_box([width, height]) if self.type == 'iris' else get_point_prompt(ground_truth_mask)
+        # get iris box prompt or 
+        prompt = get_bounding_box([width, height]) if self.type == 'iris' else get_point_prompt(ground_truth_mask)
 
-    # prepare image and prompt for the model
-    if self.type == 'iris':
-        inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt")
-    else: 
-       inputs = self.processor(image, input_labels = [[prompt]], return_tensors="pt")
+        # prepare image and prompt for the model
+        if self.type == 'iris':
+            inputs = self.processor(image, input_boxes=[[prompt]], return_tensors="pt")
+        else: 
+            inputs = self.processor(image, input_points = [[prompt]], return_tensors="pt")
 
-    # remove batch dimension which the processor adds by default
-    inputs = {k:v.squeeze(0) for k,v in inputs.items()}
+        # remove batch dimension which the processor adds by default
+        inputs = {k:v.squeeze(0) for k,v in inputs.items()}
 
-    # add ground truth segmentation
-    inputs["ground_truth_mask"] = ground_truth_mask
+        # add ground truth segmentation
+        inputs["ground_truth_mask"] = ground_truth_mask
 
-    return inputs
+        ## apply random data augmentation
+        if self.transform:
+            inputs = self.transform(inputs)
+
+        return inputs
 
 def fine_tune(images, pred_masks, mode='iris'):
     ## images: np array of images 
     ## pred_masks: np array of masks
+    print('running fine-tuning')
     data_dic = create_dataset(images, pred_masks)
     # Initialize the processor
-    processor = SamProcessor.from_pretrained("dhkim2810/MobileSAM")
-    dataset = SAMDataset(dataset=data_dic, processor=processor, task=mode)
+    processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    augmentations = transforms.Compose([transforms.RandomHorizontalFlip(0.5), transforms.ColorJitter(brightness=0.2)])
+    dataset = SAMDataset(dataset=data_dic, processor=processor, transform= augmentations, task=mode)
+    print('dataset initialized!')
     # Create a DataLoader instance for the training dataset
-    train_dataloader = DataLoader(dataset, batch_size=10, shuffle=True, drop_last=False)
-    model = SamModel.from_pretrained("dhkim2810/MobileSAM")
+    BATCH_SIZE = 2
+    train_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+    model = SamModel.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    print('loaded model!')
     # make sure we only compute gradients for mask decoder
     for name, param in model.named_parameters():
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
-            return 
     # Initialize the optimizer and the loss function
     optimizer = Adam(model.mask_decoder.parameters(), lr=1e-5, weight_decay=0)
     #Try DiceFocalLoss, FocalLoss, DiceCELoss
-    seg_loss = monai.losses.DiceCELoss(sigmoid=True, squared_pred=True, reduction='mean')
-   
+    seg_loss = monai.losses.FocalLoss(gamma=2.0, alpha=0.5)
     #Training loop
     num_epochs = 4
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.train()
+    print('starting fine tuning!')
+
     for epoch in range(num_epochs):
+        print(f'EPOCH: {epoch}')
         epoch_losses = []
         for batch in tqdm(train_dataloader):
         # forward pass
@@ -88,11 +98,13 @@ def fine_tune(images, pred_masks, mode='iris'):
                 outputs = model(pixel_values=batch["pixel_values"].to(device),
                                 input_points=batch["input_points"].to(device),
                                 multimask_output=False)
+            # postprocess mask to original scale
+            predicted_masks = postprocess_masks(outputs.pred_masks.squeeze(1), batch["reshaped_input_sizes"][0].tolist(), 
+                                                batch["original_sizes"][0].tolist(), processor.image_processor.pad_size).to(device)
             # compute loss
-            predicted_masks = outputs.pred_masks.squeeze(1)
             ground_truth_masks = batch["ground_truth_mask"].float().to(device)
             loss = seg_loss(predicted_masks, ground_truth_masks.unsqueeze(1))
-
+            
             # backward pass (compute gradients of parameters w.r.t. loss)
             optimizer.zero_grad()
             loss.backward()
@@ -100,19 +112,18 @@ def fine_tune(images, pred_masks, mode='iris'):
             # optimize
             optimizer.step()
             epoch_losses.append(loss.item())
-
-        print(f'EPOCH: {epoch}')
-        print(f'Mean loss: {mean(epoch_losses)}')             
+        
+        print(f'Mean loss: {sum(epoch_losses)/len(epoch_losses)}')             
     # Save the model's state dictionary to a file
-    torch.save(model.state_dict(), "/content/drive/MyDrive/ColabNotebooks/models/SAM/{mode}_model_checkpoint.pth")
+    print('done!')
+    torch.save(model.state_dict(), f"./models/{mode}_model_checkpoint.pth")
 
 def create_dataset(images, masks):
     # Convert the NumPy arrays to Pillow images and store them in a dictionary
-    # TO-DO: add a bit of gaussian blur to remove noise and non-robust feature
-    # TO-DO: filter out for potential "empty" masks
+    
     dataset_dict = {
-        "image": [Image.fromarray(img) for img in images],
-        "label": [Image.fromarray(mask) for mask in masks],
+        "image": [Image.fromarray(img).filter(ImageFilter.GaussianBlur(radius = 3)) for img in images],
+        "label": [ImageOps.grayscale(Image.fromarray(mask)) for mask in masks],
     }
     # Create the dataset using the datasets.Dataset class
     dataset = Dataset.from_dict(dataset_dict)
@@ -129,8 +140,73 @@ def get_bounding_box(frame_size):
 
 
 def get_point_prompt(mask):
-    ## find iris center from mask
+    ## find pupil center from mask
     rows, cols = np.nonzero(mask)
     center_row = np.mean(rows)
     center_col = np.mean(cols)
     return [center_row, center_col]
+
+
+def postprocess_masks(masks: torch.Tensor, input_size: Tuple[int, ...], original_size: Tuple[int, ...], image_size = Tuple[int, ...]) -> torch.Tensor:
+    """
+    Remove padding and upscale masks to the original image size.
+
+    Args:
+      masks (torch.Tensor):
+        Batched masks from the mask_decoder, in BxCxHxW format.
+      input_size (tuple(int, int)):
+        The size of the image input to the model, in (H, W) format. Used to remove padding.
+      original_size (tuple(int, int)):
+        The original size of the image before resizing for input to the model, in (H, W) format.
+
+    Returns:
+      (torch.Tensor): Batched masks in BxCxHxW format, where (H, W)
+        is given by original_size.
+    """
+    masks = F.interpolate(
+        masks,
+        (image_size['height'], image_size['width']),
+        mode="bilinear",
+        align_corners=False,
+    )
+    masks = masks[..., : input_size[0], : input_size[1]]
+    masks = F.interpolate(masks, original_size, mode="bilinear", align_corners=False)
+    return masks
+
+
+def generate_eval(images, modelCheckpointFilePath):
+    #make the predictions, then call compute_metrics
+    model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
+
+    # Create an instance of the model architecture with the loaded configuration
+    my_model = SamModel(config=model_config)
+    #Update the model by loading the weights from saved file.
+    my_model.load_state_dict(torch.load(modelCheckpointFilePath))
+    ## move to device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    my_model = my_model.to(device)
+    ## prepare prompt and input
+    augmented = [Image.fromarray(im).filter(ImageFilter.GaussianBlur(radius = 3)) for im in images]
+    width, height = augmented[0].size
+    prompt = get_bounding_box([width, height])
+    segmentations = []
+    for image in augmented:
+        inputs = processor(image, input_boxes=[[prompt]], return_tensors="pt").to(device)
+        ## generate eval – forward pass
+        my_model.eval()
+        with torch.no_grad():
+            outputs = my_model(**inputs, multimask_output=False)
+        predicted_masks = postprocess_masks(outputs.pred_masks.squeeze(1), inputs["reshaped_input_sizes"][0].tolist(), 
+                                        inputs["original_sizes"][0].tolist(), processor.image_processor.pad_size).to(device)
+        # convert soft mask to hard mask
+        seg_prob = torch.sigmoid(predicted_masks)
+        seg_prob = seg_prob.cpu().numpy().squeeze()
+        seg = (seg_prob > 0.5).astype(np.uint8)
+        segmentations.append(seg)
+    return segmentations
+
+
+"""
+find fine_tune usage in naive_train.py
+"""
