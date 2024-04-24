@@ -9,3 +9,5 @@ npz_files/
 raw_videos/
 images/
 test_images/
+__pycache__
+models/
