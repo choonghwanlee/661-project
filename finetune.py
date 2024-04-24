@@ -31,6 +31,8 @@ class SAMDataset(TorchDataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
         image = item["image"]
+        if self.transform:
+            image = self.transform(image)
         width, height = image.size
         ground_truth_mask = np.array(item["label"])
 
@@ -48,10 +50,6 @@ class SAMDataset(TorchDataset):
 
         # add ground truth segmentation
         inputs["ground_truth_mask"] = ground_truth_mask
-
-        ## apply random data augmentation
-        if self.transform:
-            inputs = self.transform(inputs)
 
         return inputs
 
@@ -75,7 +73,7 @@ def fine_tune(images, pred_masks, mode='iris'):
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
     # Initialize the optimizer and the loss function
-    optimizer = Adam(model.mask_decoder.parameters(), lr=1e-5, weight_decay=0)
+    optimizer = Adam(model.mask_decoder.parameters(), lr=1e-5, weight_decay=1e-5)
     #Try DiceFocalLoss, FocalLoss, DiceCELoss
     seg_loss = monai.losses.FocalLoss(gamma=2.0, alpha=0.5)
     #Training loop
@@ -174,7 +172,7 @@ def postprocess_masks(masks: torch.Tensor, input_size: Tuple[int, ...], original
     return masks
 
 
-def generate_eval(images, modelCheckpointFilePath):
+def generate_eval(images, modelCheckpointFilePath, mode='iris'):
     #make the predictions, then call compute_metrics
     model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
     processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")

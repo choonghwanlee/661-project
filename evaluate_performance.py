@@ -61,3 +61,5 @@ ious = evaluate_on_images(test_images, test_masks, "./models/base_model_checkpoi
 mean_iou = sum(ious)/len(ious)
 print(mean_iou)
 """
+
+## evaluate performance on baseline model using the test dataset
