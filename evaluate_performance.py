@@ -54,7 +54,7 @@ def evaluate_on_images(images, true_masks, modelCheckpointFilePath="./weights/mo
             multimask_output=False,
         )
 
-        metrics = compute_metrics2(true_mask, pred_mask, metric=metric)
+        metrics = compute_metrics(true_mask, pred_mask, metric=metric)
         iou_vals[image_index] = metrics["mean_iou"]
         
     return iou_vals
