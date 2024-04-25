@@ -54,6 +54,27 @@ def evaluate_on_images(images, true_masks, modelCheckpointFilePath):
     return iou_vals
 
 
+def visualize_masks(image, masks):
+    fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+
+    # Plot the first image on the left
+    axes[0].imshow(np.array(image))  # Assuming the first image is grayscale
+    axes[0].set_title("Image")
+
+    # Plot the second image on the right
+    axes[1].imshow(masks, cmap='gray')  # Assuming the second image is grayscale
+    axes[1].set_title("Masks")
+
+    # Hide axis ticks and labels
+    for ax in axes:
+        ax.set_xticks([])
+        ax.set_yticks([])
+        ax.set_xticklabels([])
+        ax.set_yticklabels([])
+
+    # Display the images side by side
+    plt.show()
+
 ## example usage 
 
 """
@@ -61,3 +82,5 @@ ious = evaluate_on_images(test_images, test_masks, "./models/base_model_checkpoi
 mean_iou = sum(ious)/len(ious)
 print(mean_iou)
 """
+
+## evaluate performance on baseline model using the test dataset
