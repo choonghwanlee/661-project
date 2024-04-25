@@ -73,7 +73,7 @@ def fine_tune(images, pred_masks, mode='iris'):
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
     # Initialize the optimizer and the loss function
-    optimizer = Adam(model.mask_decoder.parameters(), lr=1e-5, weight_decay=1e-5)
+    optimizer = Adam(model.mask_decoder.parameters(), lr=0.001, weight_decay=1e-5)
     #Try DiceFocalLoss, FocalLoss, DiceCELoss
     seg_loss = monai.losses.FocalLoss(gamma=2.0, alpha=0.5)
     #Training loop
