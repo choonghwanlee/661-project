@@ -11,7 +11,7 @@ from torch.optim import Adam
 import torch.nn.functional as F
 from typing import Tuple
 import monai
-import math
+import time
 from tqdm import tqdm
 
 
@@ -32,6 +32,7 @@ class SAMDataset(TorchDataset):
     def __getitem__(self, idx):
         item = self.dataset[idx]
         image = item["image"]
+        ## apply random data augmentation
         if self.transform:
             image = self.transform(image)
         width, height = image.size
@@ -54,7 +55,7 @@ class SAMDataset(TorchDataset):
 
         return inputs
 
-def fine_tune(images, pred_masks, model_save_ckpt, model_load_ckpt=None, base_model=None, mode='iris', num_epochs=4, batch_size=2):
+def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelCheckpointFilePath = None, BATCH_SIZE=2, num_epochs=4):
     ## images: np array of images 
     ## pred_masks: np array of masks
     print('running fine-tuning')
@@ -65,19 +66,22 @@ def fine_tune(images, pred_masks, model_save_ckpt, model_load_ckpt=None, base_mo
     dataset = SAMDataset(dataset=data_dic, processor=processor, transform= augmentations, task=mode)
     print('dataset initialized!')
     # Create a DataLoader instance for the training dataset
-    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
-    model = base_model
-
-    if (model is None):
+    train_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
+    if not modelCheckpointFilePath:
         model = SamModel.from_pretrained("Zigeng/SlimSAM-uniform-50")
-        model.load_state_dict(torch.load(model_load_ckpt))
+    else:
+        model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+        # Create an instance of the model architecture with the loaded configuration
+        model = SamModel(config=model_config)
+        #Update the model by loading the weights from saved file.
+        model.load_state_dict(torch.load(modelCheckpointFilePath))
     print('loaded model!')
     # make sure we only compute gradients for mask decoder
     for name, param in model.named_parameters():
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
     # Initialize the optimizer and the loss function
-    optimizer = Adam(model.mask_decoder.parameters(), lr=0.001, weight_decay=1e-5)
+    optimizer = Adam(model.mask_decoder.parameters(), lr=0.001, weight_decay=1e-4)
     #Try DiceFocalLoss, FocalLoss, DiceCELoss
     seg_loss = monai.losses.FocalLoss(gamma=2.0, alpha=0.5)
     #Training loop
@@ -85,7 +89,7 @@ def fine_tune(images, pred_masks, model_save_ckpt, model_load_ckpt=None, base_mo
     model.to(device)
     model.train()
     print('starting fine tuning!')
-
+    start_time = time.time()
     for epoch in range(num_epochs):
         print(f'EPOCH: {epoch}')
         epoch_losses = []
@@ -117,8 +121,9 @@ def fine_tune(images, pred_masks, model_save_ckpt, model_load_ckpt=None, base_mo
         print(f'Mean loss: {sum(epoch_losses)/len(epoch_losses)}')             
     # Save the model's state dictionary to a file
     print('done!')
-    torch.save(model.state_dict(), model_save_ckpt)
-    return model
+    end_time = time.time() - start_time
+    torch.save(model.state_dict(), f"./models/{checkpoint_info}_{mode}_model_checkpoint.pth")
+    return end_time
 
 def create_dataset(images, masks):
     # Convert the NumPy arrays to Pillow images and store them in a dictionary
@@ -185,6 +190,10 @@ def _are_points_in_bounding_box(contour, bounding_box):
     
     return True
 
+def generate_eval(images, modelCheckpointFilePath):
+    #make the predictions, then call compute_metrics
+    model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
 
 
 def reduce_masks(sam_predictions):

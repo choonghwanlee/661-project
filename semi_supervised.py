@@ -145,8 +145,9 @@ for split in range(NUM_TRAIN_SPLITS):
     train_images.extend(new_train_images)
     train_masks.extend(new_train_masks)
     
-    model_save_ckpt = os.path.join(semi_supervised_ckpt_folder, f"{MODE}_model_{str(split + 1)}_checkpoint.pth")
-    model = fine_tune(images=train_images, pred_masks=train_masks, model_load_ckpt=base_model_load_ckpt, model_save_ckpt=model_save_ckpt, mode=MODE, num_epochs=4, batch_size=16)
+    model_save_ckpt = f"./models/semiSupervised_{MODE}_model_checkpoint.pth"
+    fine_tune(images=train_images, pred_masks=train_masks, mode=MODE, checkpoint_info='semiSupervised', modelCheckpointFilePath = base_model_load_ckpt, BATCH_SIZE=16, num_epochs=4)
+    model.load_state_dict(torch.load(model_save_ckpt))
     print("evaluating on test set")
     evaluate_on_images(images=test_images, true_masks=labeled_masks, modelCheckpointFilePath=model_save_ckpt)    
     if len(image_paths_to_add_to_training) < 20:
