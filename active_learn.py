@@ -1,12 +1,25 @@
 import torch
 import numpy as np
-from mobile_sam import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 import matplotlib.pyplot as plt
 import cv2
-from PIL import Image
 from skimage import metrics
 from evaluate_performance import evaluate_on_images
-import generate_np as gnp
+import open_clip
+from sklearn.metrics.pairwise import cosine_similarity
+import math
+from scipy.stats import entropy
+from transformers import SamConfig, SamModel, SamProcessor
+from PIL import Image, ImageOps, ImageFilter
+from finetune import fine_tune, get_bounding_box, postprocess_masks
+import statistics
+import time
+import os
+
+h = 1920
+w = 1080
+proj_eye_center, proj_eye_radius = (w/2, h/3), (0.25*w, 0.1*h)
+y_start, y_end = int(proj_eye_center[1]-proj_eye_radius[1]), int(proj_eye_center[1]+proj_eye_radius[1])
+x_start, x_end = int(proj_eye_center[0]-proj_eye_radius[0]), int(proj_eye_center[0]+proj_eye_radius[0])
 
 def get_bounding_box(frame_size):
     # get bounding box from mask
@@ -29,12 +42,12 @@ def show_points(coords, labels, ax, marker_size=375):
     pos_points = coords[labels==1]
     neg_points = coords[labels==0]
     ax.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
-    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)   
-    
+    ax.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=marker_size, edgecolor='white', linewidth=1.25)
+
 def show_box(box, ax):
     x0, y0 = box[0], box[1]
     w, h = box[2] - box[0], box[3] - box[1]
-    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))  
+    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2)) 
 
 def predict_mask_w_point(image):
     model_type = "vit_t"
@@ -90,83 +103,156 @@ def imageEncoder(img, model, preprocess, device):
     return img1
 
 def generateScore(image1, image2, model, preprocess, device):
-    test_img = cv2.imread(image1, cv2.IMREAD_UNCHANGED)
-    data_img = cv2.imread(image2, cv2.IMREAD_UNCHANGED)
-    img1 = imageEncoder(test_img, model, preprocess, device)
-    img2 = imageEncoder(data_img, model, preprocess, device)
-    cos_scores = util.pytorch_cos_sim(img1, img2)
-    score = round(float(cos_scores[0][0])*100, 2)
-    return score
+    img1 = imageEncoder(image1, model, preprocess, device)
+    img2 = imageEncoder(image2, model, preprocess, device)
+    score = cosine_similarity(img1.cpu().detach().numpy(), img2.cpu().detach().numpy())*100
+    return score[0][0]
 
-def model_sim(image1, image2):
-  #image1 and image2 are paths to the image
-  device = "cuda" if torch.cuda.is_available() else "cpu"
-  model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-16-plus-240', pretrained="laion400m_e32")
-  model.to(device)
-  return round(generateScore(image1, image2, model, preprocess, device), 2)
+def model_sim(image1, image2, model, preprocess, device):
+    return generateScore(image1, image2, model, preprocess, device)
 
 def ssim(image1, image2):
-  image2 = cv2.resize(image2, (image1.shape[1], image1.shape[0]), interpolation = cv2.INTER_AREA)
-  image1_gray = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
-  image2_gray = cv2.cvtColor(image2, cv2.COLOR_BGR2GRAY)
-  return metrics.structural_similarity(image1_gray, image2_gray, full=True)[0]*100
+    image2 = cv2.resize(image2, (image1.shape[1], image1.shape[0]), interpolation = cv2.INTER_AREA)
+    image1_gray = cv2.cvtColor(image1, cv2.COLOR_BGR2GRAY)
+    image2_gray = cv2.cvtColor(image2, cv2.COLOR_BGR2GRAY)
+    return metrics.structural_similarity(image1_gray, image2_gray, full=True)[0]*100
 
-def overall_similarity(image1, image2, importance=[(1/2), (1/2)]):
-  if (importance[0] + importance[1]) != 1:
-    print("weights must sum to 1")
-    return
+def overall_similarity(img1, img2, model, preprocess, device, importance=[.5, .5]):
+    if (importance[0] + importance[1]) != 1:
+        print("weights must sum to 1")
+        return
+    
+    h, w, _ = img1.shape
+    proj_eye_center, proj_eye_radius = (w/2, h/3), (0.25*w, 0.1*h)
+    y_start, y_end = int(proj_eye_center[1]-proj_eye_radius[1]), int(proj_eye_center[1]+proj_eye_radius[1])
+    x_start, x_end = int(proj_eye_center[0]-proj_eye_radius[0]), int(proj_eye_center[0]+proj_eye_radius[0])
 
-  img1 = cv2.imread(image1, cv2.IMREAD_UNCHANGED)
-  img2 = cv2.imread(image2, cv2.IMREAD_UNCHANGED)
+    crop_img1 = img1[y_start:y_end, x_start:x_end]
+    crop_img2 = img2[y_start:y_end, x_start:x_end]
 
-  h, w, _ = img1.shape
-  proj_eye_center, proj_eye_radius = (w/2, h/3), (0.25*w, 0.1*h)
-  y_start, y_end = int(proj_eye_center[1]-proj_eye_radius[1]), int(proj_eye_center[1]+proj_eye_radius[1])
-  x_start, x_end = int(proj_eye_center[0]-proj_eye_radius[0]), int(proj_eye_center[0]+proj_eye_radius[0])
+    model_similarity_score = model_sim(crop_img1, crop_img2, model, preprocess, device)
+    ssim_score = ssim(crop_img1, crop_img2)
 
-  crop_img1 = img1[y_start:y_end, x_start:x_end]
-  crop_img2 = img2[y_start:y_end, x_start:x_end]
+    return model_similarity_score*importance[0] + ssim_score*importance[1]
 
-  model_similarity_score = model_sim(crop_img1, crop_img2)
-  ssim_score = ssim(crop_img1, crop_img2)
+def generate_preds(image_names, images, modelCheckpointFilePath):
+    #make the predictions, then call compute_metrics
+    model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
 
-#   print(model_similarity_score)
-#   print(ssim_score)
+    # Create an instance of the model architecture with the loaded configuration
+    my_model = SamModel(config=model_config)
+    #Update the model by loading the weights from saved file.
+    my_model.load_state_dict(torch.load(modelCheckpointFilePath))
+    ## move to device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    my_model = my_model.to(device)
+    ## prepare prompt and input
+    print('model loaded')
+    augmented = [Image.fromarray(im).filter(ImageFilter.GaussianBlur(radius = 3)) for im in images]
+    print('image augmented')
+    width, height = augmented[0].size
+    prompt = get_bounding_box([width, height])
+    segmentations = []
+    scores = []
+    print('generating predictions')
+    count = 0;
+    for image in images:
+        inputs = processor(image, input_boxes=[[prompt]], return_tensors="pt").to(device)
+        if (count%200) == 0:
+            print(f'processed image {count}/{len(augmented)}')
+        ## generate eval – forward pass
+        my_model.eval()
+        with torch.no_grad():
+            outputs = my_model(**inputs, multimask_output=False)
+            # scores.append(np.array(outputs.iou_scores.cpu())[0][0][0])
+        predicted_masks = postprocess_masks(outputs.pred_masks.squeeze(1), inputs["reshaped_input_sizes"][0].tolist(), 
+                                        inputs["original_sizes"][0].tolist(), processor.image_processor.pad_size).to(device)
+        # convert soft mask to hard mask
+        seg_prob = torch.sigmoid(predicted_masks)
+        seg_prob = seg_prob.cpu().numpy().squeeze()
+        crop_seg_prob = seg_prob[y_start:y_end, x_start:x_end].flatten()
+        scores.append(statistics.mean([1-x for x in crop_seg_prob if x > 0.5]))
+        
+        # scores.append(entropy(seg_prob.flatten()))
+        seg = (seg_prob > 0.5).astype(np.uint8)
+        segmentations.append(seg)
+        count += 1
+    return segmentations, scores
 
-  return model_similarity_score*importance[0] + ssim_score*importance[1]
+
+def calc_circularity(mask):
+    iris_contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    biggest_area = -1
+    circ = -1
+
+    for contour in iris_contours:
+        convex_closed = cv2.convexHull(contour, False)
+        perimeter = cv2.arcLength(convex_closed, True)
+        area = cv2.contourArea(convex_closed)
+        if perimeter == 0:
+            continue
+        ## usually between 0 and 1, higher == more circular
+        circularity = (4*math.pi*area)/(perimeter*perimeter)
+
+        if (area > biggest_area):
+            biggest_area = area
+            circ = circularity
+
+    return circ
+
 
 """
 this should use uncertainty and similarity to choose best data points to label
 compare all the images with low certainty with the images that have already been 
 """
-def hybrid_selector():
-   # uncertainty sampling -> if circularity is <0.7 or if the score is <0.7
+def hybrid_selector(image_names, images_arr, masks, certainties, labeled_arr):
+    length = len(images_arr)
+    if len(image_names) != length or len(masks) != length or len(certainties) != length:
+        print(f"ARRAYS MUST BE OF SAME LENGTH. GOT: \n image_names: {len(image_names)}, images_arr: {length}, masks: {len(masks)}, certainties: {len(certainties)}")
+    
+    print("getting uncertain images...")
+    ind = 0
+    bad_result_inds = []
+    # uncertainty sampling -> if circularity is <0.7 or if the score is <0.7
+    for ind in range(length):
+        # calc circularity
+        circularity = calc_circularity(masks[ind])
+        # print(f"circularity: {circularity}")
+        if circularity < 0.7 or certainties[ind] > 0.3:
+            print(f"certainty: {certainties[ind]}")
+            bad_result_inds.append(ind)
+    print(bad_result_inds)
+    
+    print(f"bad results: {len(bad_result_inds)}")
+    print("selecting images to label...")
+    label_inds = []
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    model, _, preprocess = open_clip.create_model_and_transforms('ViT-B-16-plus-240', pretrained="laion400m_e32")
+    model.to(device)
+    for i in bad_result_inds:
+        highest_sim = 0
+        for labeled in labeled_arr:
+            similarity = overall_similarity(images_arr[i], labeled, model, preprocess, device, importance=[0.75, 0.25])
+            highest_sim = max(highest_sim, similarity)
+        if highest_sim < 80.0:
+            label_inds.append(i)
+        print(f"similarity: {highest_sim}")
+    print(f"label results: {len(label_inds)}")
+    print("compiling images to label...")
+    label_names = []
+    label_arrs = []
+    for index in label_inds:
+        label_names.append(image_names[index])
+        label_arrs.append(images_arr[index])
 
    # find the images with similarity below x (idk yet)
     # for all labelled images, compare with the current image
-
+    print(f"images: {label_names}")
    # return images who don't meed the threshold
-   return
+    return label_names, label_arrs
 
-def active_learn():
-   # for each image, generate mask from the model
-   # collect all the results (mask + certainty score + image name)
-   # uhhh let's pause on this real quick
-   return
-
-
-# steps:
-# for each image
-    # generate mask from the model
-    # option 1: do all the uncertainty and similarity calculations here and store the values (image name + final value)
-    # option 2: store all the results (mask + certainty score + image name)
-# option 1: go through the final results and select the ones that need to be manually annotated
-# option 2: run hybrid selector on all the results and select the ones that need to be manually annotated
-# if there are no things that need to be annotated, yay!
-# else, finetune and save the model
-# evaluate with test. if accuracy is above 
-
-def test(mode='iris'):
+def test(modelCheckPointPath, mode='iris'):
     # this will be a dictionary with key imagename and value dictionary with 2 np arrays
     image_and_mask = {}
     # load test images
@@ -200,33 +286,148 @@ def test(mode='iris'):
     masks = []
     for im in image_and_mask:
         if "mask" in image_and_mask[im]:
-            m_grayscale = np.asarray(Image.fromarray(np.array(image_and_mask[im]["mask"])).convert('L'))
+            m_grayscale = cv2.cvtColor(image_and_mask[im]["mask"], cv2.COLOR_RGB2GRAY)
             images.append(np.array(image_and_mask[im]["image"]))
             masks.append(m_grayscale)
     
     print()
     print(len(images))
     print(len(masks))
-    mious = evaluate_on_images(images, masks)
+    mious = evaluate_on_images(images, masks, modelCheckPointPath)
     return mious
 
 
+manually_labeled_images = ['aden_lefteye_0', 'aden_lefteye_1600', 'aden_lefteye_1833', 'aden_lefteye_233', 'aden_lefteye_2533', 'aden_lefteye_2733', 'aden_lefteye_2900', 'aden_lefteye_3000', 'aden_lefteye_3200', 'aden_lefteye_3566', 'aden_lefteye_3766', 'aden_lefteye_4433', 'aden_lefteye_966', 'aden_righteye_1100', 'aden_righteye_1300', 'aden_righteye_1466', 'aden_righteye_1666', 'aden_righteye_2033', 'aden_righteye_2233', 'aden_righteye_266', 'aden_righteye_2966', 'aden_righteye_3066', 'aden_righteye_3266', 'aden_righteye_3500', 'aden_righteye_3700', 'aden_righteye_3933', 'aden_righteye_4133', 'aden_righteye_4866', 'aden_righteye_500', 'aden_righteye_700', 'aden_righteye_933', 'dillon_lefteye_1200', 'dillon_righteye_3500', 'jason_lefteye_1633', 'jason_lefteye_1800', 'jason_lefteye_4166', 'jason_lefteye_4366', 'jason_lefteye_4400', 'jason_lefteye_4600', 'jason_lefteye_4833', 'jason_righteye_1533', 'jason_righteye_1733', 'jason_righteye_4700', 'dillon_righteye_3466', 'dillon_righteye_266', 'jason_lefteye_2333', 'dillon_lefteye_1233']
+t0 = time.time()
+# load images
+image_names = []
+images = []
+test_image_data = np.load('./train_data/unlabelled/images.npz')
+t1 = time.time()
+# identify which images to use (not used for training/finetuning/testing)
+lst = test_image_data.files
+print(len(lst))
+for item in lst:
+    if ("christian_lefteye" not in item) and ("cindy_lefteye" not in item) and (item not in manually_labeled_images):
+        image_names.append(item)
+        arr = test_image_data[item]
+        images.append(arr)
+print(len(image_names))
+t2 = time.time()
+# make predictions
+masks, certainties = generate_preds(image_names, images, "./models/pass3_3_001_1e4_allaug_iris_model_checkpoint.pth")
+t3 = time.time()
+# select images to label
+to_label_names, to_label_arrs = hybrid_selector(image_names, images_arr, masks, certainties, labeled_arr)
+t4 = time.time()
+print(len(to_label_names))
+print(to_label_names.sort())
+print("------------")
+print(f"time to load images: {t1-t0}")
+print(f"time to identify which images to use: {t2-t1}")
+print(f"time to make predictions: {t3-t2}")
+print(f"time to select images to label: {t4-t3}")
+
+t5 = time.time()
+# finetuning
+
+new_images = []
+new_masks = []
+
+mask_directory = "train/masks"
+img_directory = "train/images"
+for filename in os.listdir(mask_directory):
+    if ".png" in filename:
+        f = os.path.join(mask_directory, filename)
+        mask = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB)
+        new_masks.append(np.asarray(mask))
+
+        name = filename.replace("_iris.png", ".jpg")
+        img_f = os.path.join(img_directory, name)
+        img = cv2.cvtColor(cv2.imread(img_f), cv2.COLOR_BGR2RGB)
+        new_images.append(np.asarray(img))
+
+mask_directory = "label-1/masks"
+img_directory = "label-1/images"
+for filename in os.listdir(mask_directory):
+    if ".png" in filename:
+        f = os.path.join(mask_directory, filename)
+        mask = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB)
+        new_masks.append(np.asarray(mask))
+
+        name = filename.replace("_0_iris.png", ".jpg")
+        img_f = os.path.join(img_directory, name)
+        img = cv2.cvtColor(cv2.imread(img_f), cv2.COLOR_BGR2RGB)
+        new_images.append(np.asarray(img))
+        
+mask_directory = "label-2/masks"
+img_directory = "label-2/images"
+for filename in os.listdir(mask_directory):
+    if ".png" in filename:
+        f = os.path.join(mask_directory, filename)
+        mask = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB)
+        new_masks.append(np.asarray(mask))
+
+        name = filename.replace("_iris.png", ".jpg")
+        img_f = os.path.join(img_directory, name)
+        img = cv2.cvtColor(cv2.imread(img_f), cv2.COLOR_BGR2RGB)
+        new_images.append(np.asarray(img))
+        
+mask_directory = "label-3/masks"
+img_directory = "label-3/images"
+for filename in os.listdir(mask_directory):
+    if ".png" in filename:
+        f = os.path.join(mask_directory, filename)
+        mask = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB)
+        new_masks.append(np.asarray(mask))
+
+        name = filename.replace("_iris.png", ".jpg")
+        img_f = os.path.join(img_directory, name)
+        img = cv2.cvtColor(cv2.imread(img_f), cv2.COLOR_BGR2RGB)
+        new_images.append(np.asarray(img))
+        
+mask_directory = "label-4/masks"
+img_directory = "label-4/images"
+for filename in os.listdir(mask_directory):
+    if ".png" in filename:
+        f = os.path.join(mask_directory, filename)
+        mask = cv2.cvtColor(cv2.imread(f), cv2.COLOR_BGR2RGB)
+        new_masks.append(np.asarray(mask))
+
+        name = filename.replace("_iris.png", ".jpg")
+        img_f = os.path.join(img_directory, name)
+        img = cv2.cvtColor(cv2.imread(img_f), cv2.COLOR_BGR2RGB)
+        new_images.append(np.asarray(img))
+
+print(len(new_images))
+fine_tune(new_images, new_masks, checkpoint_info='00pass4_8_001_1e4_again_pretrained_baseaug') #, modelCheckpointFilePath=)
+t6 = time.time()
+print(f"time to fine_tune: {t6-t5}")
+
+t7 = time.time()
+# evaluating
+new_mious = test("./models/00pass4_8_001_1e4_again_pretrained_baseaug_iris_model_checkpoint.pth")
+# print(new_mious)
+print(len(new_mious))
+new_mious_avg = np.average(np.array(new_mious))
+print(new_mious_avg)
+t8 = time.time()
+print(f"time to eval: {t8-t7}")
+
+
+
 """
+PRETRAINED MODEL ON IRIS DETECTION
+
 print(test())
-    #this is the mious from running test on the base model for iris (line above)
-mious_base_iris = [0.3871262856324171, 0.3865523945869084, 0.4906237943672839, 0.49006462191358025, 0.4052900752314815, 0.4920454764660494, 0.49165629822530865, 0.3705327275763898, 0.49263768325617285, 0.40442925347222225, 0.492842399691358, 0.3971580825617284, 0.4896453028549383, 0.48857108410493827, 0.4926408179012346, 0.49225646219135805, 0.4899045138888889, 0.4894171971450617, 0.48535180362654323, 0.4917703510802469, 0.41138768325617286, 0.3901633936176267, 0.49155671296296294, 0.49310233410493826, 0.48854407793209875, 0.3645291469190874, 0.4698051697530864, 0.4026535976080247, 0.3904070346451354, 0.4918916377314815, 0.4914875096450617, 0.30901927821703185, 0.4767194733796296, 0.49288387345679013, 0.4906131847993827, 0.4904513888888889, 0.39215231271560147, 0.3910473188889194, 0.3981786730118374, 0.4922733410493827, 0.4928633777006173, 0.377425394990478, 0.40455078125, 0.4891632908950617, 0.4075428759369579, 0.4926466049382716, 0.492626350308642, 0.3906001170988424, 0.4925371334876543, 0.40764298804012344, 0.41057798032407405, 0.48715760030864197, 0.49251326195987655, 0.4925882523148148, 0.49023992091049384, 0.4899146412037037, 0.3812664239247185, 0.39531216540271286, 0.35175291458165114, 0.24248370527126753, 0.46536241319444444, 0.3941263843711043, 0.4923488136574074, 0.49224729938271605, 0.49168113425925924, 0.40682751453393745, 0.40147882908950616, 0.4919902584876543, 0.4920924961419753, 0.49004822530864195, 0.4903778452932099, 0.3878743256035673, 0.39745816168960124, 0.3399852585599098, 0.39626953125, 0.48882691936728395, 0.34979628615860126, 0.4925778838734568, 0.49092977082817923, 0.48960792824074073, 0.4899901138117284, 0.38477252020033004, 0.39463662229938273, 0.4919777199074074, 0.4895529513888889, 0.49288194444444444, 0.4009631141413956, 0.4887897858796296, 0.49253303433641976, 0.40425907457383214, 0.4925366512345679, 0.49254267939814816, 0.48866174768518517, 0.40757667824074073, 0.4886441454475309, 0.40918137538580246, 0.3772706873588511, 0.49225260416666666, 0.4928462577160494, 0.4900853587962963, 0.3049873715002211, 0.3264205671450201, 0.39168492844149255, 0.39679277584876543, 0.4917025945216049, 0.49102478780864195, 0.49088710455246914, 0.38904714407535024, 0.3814702177764126, 0.4020556037808642, 0.49154682677469136, 0.48961998456790123, 0.4778727816358025, 0.49222366898148145, 0.34565907437466953, 0.4885737364969136, 0.407543420966968, 0.4928614486882716, 0.4929542824074074, 0.39663194444444444, 0.49159095293209876, 0.49226128472222225, 0.49198037229938274, 0.4917947048611111, 0.4813524787808642, 0.40138273698670707, 0.40984780567506063, 0.3903419906926675, 0.3823897520732904, 0.49074387538580244, 0.4923939043209877, 0.47908058449074076, 0.4687133487654321, 0.35832511513943816, 0.43101393711419755, 0.3116010045732166, 0.38855933736029225, 0.4916775173611111, 0.39422293233844186, 0.4012208236882716, 0.4899587673611111, 0.40404369212962965, 0.48777006172839504, 0.4913544077932099, 0.49261091820987657, 0.36580714093539596, 0.36858870967741936, 0.49295452353395064, 0.41015263310185185, 0.40274570794753084, 0.49207585841049384, 0.49261405285493826, 0.40032542469659016, 0.3970739293981482, 0.49022882908950616, 0.4909174864969136, 0.4888428337191358, 0.49283347800925925, 0.3853649818481068, 0.3955925273631457, 0.4917616705246914, 0.4924040316358025, 0.4922993827160494, 0.3968569155092593, 0.40644599076291993, 0.4920247395833333, 0.4921624228395062, 0.4897535686728395, 0.38034781492218595, 0.35566520015998254, 0.4361140046296296, 0.49180362654320986, 0.48335358796296296, 0.3500312662416137, 0.36684635975492624, 0.4916823398919753, 0.4923982445987654, 0.4905167341820988, 0.38168130123920607, 0.40433400848765433, 0.4927510127314815, 0.492681568287037, 0.3751950875489445, 0.39759358907708675, 0.39600652598094677, 0.48857036072530863, 0.4906442901234568, 0.4062068383487654, 0.4077787422839506, 0.4053616898148148, 0.49237630208333333, 0.49254002700617283, 0.26640616612932766, 0.33257891570382875, 0.49348934220679014, 0.47584080825617286, 0.4927789834104938, 0.4900491898148148, 0.39509886188271603, 0.39878464703595856, 0.4919974922839506, 0.48943190586419755, 0.4046190200617284, 0.3933316350997857, 0.4908815586419753, 0.49158275462962964, 0.49310329861111113, 0.4039809625220752, 0.40648616872034443, 0.4922345196759259, 0.4918494405864198, 0.3874856464648949, 0.3891899229983897, 0.49305531442901235, 0.48870780285493826, 0.48755690586419753, 0.40882426697530866, 0.4062835165895062, 0.41095052083333333, 0.4924537037037037, 0.49292582947530866, 0.4896561535493827, 0.39462533812572853, 0.3529030485970524, 0.2463059623311462, 0.3905164930555556, 0.4873895640432099, 0.48098234953703706, 0.38265156404473744, 0.39962904609579697, 0.49199049961419755, 0.48621407214506174, 0.49342255015432096, 0.3873170894046299, 0.3135304184547015, 0.40511670524691357, 0.4071479552469136, 0.492416087962963, 0.49265721450617284, 0.396440731095679, 0.39282817322530866, 0.49009620949074073, 0.49119526427469135, 0.49255931712962964, 0.49228949652777776, 0.49022786458333334, 0.49173731674382715, 0.48901017554012344, 0.4086938175154321, 0.3873858013332684, 0.3906037727659636, 0.4921879822530864, 0.49188368055555554, 0.4927425733024691, 0.4890596064814815, 0.4720613908179012, 0.45584514853395064, 0.3597280362050835, 0.3849604296744392, 0.492310474537037]
+    #this is the mious from running test on the pretrained model for iris (line above)
+mious_base_iris = [0.4933260235662088, 0.49456124450219374, 0.4832681071169556, 0.4826067726532986, 0.49302743459249254, 0.49450037768372873, 0.494620808700202, 0.492379924346995, 0.49516633007828736, 0.49300185309489236, 0.49472957708063786, 0.4922172865305233, 0.4946474964774582, 0.49441447018634055, 0.4948954217970404, 0.4950794741333151, 0.4822401608121129, 0.492858110351498, 0.4922795151497368, 0.49464505428271005, 0.49355210889122564, 0.4928948263090596, 0.49470427065485983, 0.49403921603120315, 0.4945408063064691, 0.49509352638406495, 0.4906434092262216, 0.4941175382317415, 0.4939127746784668, 0.48426539565776666, 0.48419869746812483, 0.4951142681087964, 0.49433143974100546, 0.494359942983511, 0.4834893416072796, 0.483552298708695, 0.494387451897316, 0.4930539396706743, 0.4926704341315179, 0.4932972409897518, 0.49499850165258186, 0.4944168993362971, 0.4927518770199597, 0.49470729798445184, 0.4932050229817577, 0.49312846350068906, 0.4919527247003279, 0.4935779450300329, 0.49418717208121726, 0.4931130723832085, 0.49312041046310967, 0.4903235957797158, 0.4951823043979897, 0.48311090325232214, 0.48286711833409535, 0.48319512122413133, 0.493836611419052, 0.49407810927861046, 0.4953289618486842, 0.49524469745929656, 0.4942750031521815, 0.49280615132261424, 0.49413997515083674, 0.4942989263132682, 0.4955325296091538, 0.49306895989367944, 0.49280906847039624, 0.4926877812391831, 0.49533775484658354, 0.48357365824629667, 0.48270110693172563, 0.4945457936170959, 0.4935323809417157, 0.49522876802989896, 0.4911856970024946, 0.4945145731833889, 0.4941291204192151, 0.48984776532628904, 0.49581603868135304, 0.4830046784008855, 0.483453333066106, 0.4928671094790584, 0.4932935307107222, 0.49472893848456617, 0.4817894541535648, 0.4950706019067379, 0.4926119540563113, 0.4946688727964161, 0.49462361651737563, 0.49319024675135054, 0.494780036603536, 0.4954263201619895, 0.4912043847542669, 0.49333917010120526, 0.4919851700509609, 0.4931293099966374, 0.4937517924187928, 0.49466678724095875, 0.49422448291531684, 0.4945575964501008, 0.49525298665647793, 0.49523442139387275, 0.4944893265700939, 0.4943544726912895, 0.4834379896215508, 0.48289840552263424, 0.48391810721913503, 0.4934996428990463, 0.49467906075972917, 0.4932888977831403, 0.4833252842908761, 0.4826346752267375, 0.4946097737165558, 0.49468416813609156, 0.495349433812369, 0.4944566571872778, 0.4927815389647941, 0.4932297444568792, 0.4919912189969077, 0.492935005359349, 0.49474900195113175, 0.4950513393599152, 0.49150337409900946, 0.4946063150134946, 0.4802040316473977, 0.4934003919681594, 0.49331426810405643, 0.49308806141391476, 0.49389297181764846, 0.4944983893077785, 0.49432862727117644, 0.49427362438277894, 0.4945264451743169, 0.4951671896412109, 0.4909480625101295, 0.4953897408284104, 0.49435710052269993, 0.4840667685715849, 0.4933793194093207, 0.4931599691922502, 0.4826457051016338, 0.4930587800117784, 0.49465564665600437, 0.4945496918307671, 0.49459921978956894, 0.4938132979779691, 0.4950660175946343, 0.4955178347934919, 0.4930217528204499, 0.4928923363658262, 0.4947972094701249, 0.4927087360750154, 0.49239692383299555, 0.4930989506626945, 0.49471073297341484, 0.49447934690351364, 0.4943747235331511, 0.4949238442154905, 0.49377922946671043, 0.49267433153153506, 0.49464018392441533, 0.4938286144313373, 0.4951389075554274, 0.49323239721971135, 0.4931995198687187, 0.49543205866064455, 0.48329021446017323, 0.4827920378568814, 0.4944421638820269, 0.4952143460141446, 0.4906914356438294, 0.49491724393417047, 0.4948782806239652, 0.4951247408330332, 0.49420283222343075, 0.48429307733646, 0.4945774160442248, 0.4834710440791712, 0.4938788747714416, 0.4927337850033734, 0.49485735434752426, 0.4952234649576487, 0.49522554187214807, 0.49298695975175527, 0.492604687273495, 0.4947161359012388, 0.49438924117398847, 0.49311025107586903, 0.49300593312125773, 0.4932272634775607, 0.4928158954115532, 0.49481190972762035, 0.494698335715794, 0.4945824721140188, 0.4937807543103659, 0.4945665173616597, 0.49513089330358473, 0.48329406002876946, 0.493574378937793, 0.4926518769503391, 0.49482379996049897, 0.4867420498907514, 0.4927440768123012, 0.49274431944918934, 0.49458227289006196, 0.4947656751091157, 0.493292426744311, 0.49310593705575256, 0.49299590310338215, 0.4944940217316943, 0.49460155560822916, 0.4933872784296387, 0.49275526728097585, 0.4942075393869727, 0.48469063057039913, 0.4917165048524703, 0.49326201391269126, 0.49283422865928894, 0.4928157025400624, 0.496866532158735, 0.48307913043053174, 0.48284203434084927, 0.4938881660701587, 0.4951724741982103, 0.49539596188250756, 0.491219019074657, 0.4942890456553957, 0.4943453507655709, 0.4945636795152216, 0.4930782417282724, 0.4833377710574079, 0.49414182728478995, 0.4942900129098335, 0.491769131700707, 0.4952529882058403, 0.4927173255474964, 0.492708639015704, 0.4946958342010655, 0.4935541855629987, 0.4924498167079254, 0.4927661472619982, 0.49457522284349226, 0.4946556507498075, 0.4950605407166092, 0.495099837688544, 0.4950966539515718, 0.49477311454408995, 0.4935255058641074, 0.49305207692880626, 0.4936573637439691, 0.4932210916880608, 0.4943739969269628, 0.4950195501604893, 0.49397412790569784, 0.49436559181799533, 0.4943386973239965, 0.49028580076329675, 0.495289502040721, 0.4943060648965943, 0.48322791058665293]
 print(len(mious_base_iris))
 np_mious_iris = np.array(mious_base_iris)
 print(np.average(np_mious_iris))
-    # base miou average is 0.4436347319402451
-"""
+    # pretrained miou average is 0.49249325252684534
 
-"""
-print(test(mode='pupil'))
-    #this is the mious from running test on the base model for pupil (line above)
-mious_base_pupil = [0.39117250738851633, 0.38877446801938037, 0.4961566840277778, 0.4961653645833333, 0.4088773148148148, 0.4980859375, 0.49786241319444446, 0.37390745854820645, 0.4985279224537037, 0.40794560185185186, 0.4985710841049383, 0.40081404320987657, 0.49532190393518516, 0.49359881365740743, 0.4986889949845679, 0.4982441165123457, 0.49528211805555555, 0.49124156057098767, 0.497680362654321, 0.4146385513117284, 0.39357651975841473, 0.49701630015432097, 0.4982855902777778, 0.4945413773148148, 0.36635849849696234, 0.4732764274691358, 0.4069268422067901, 0.3946021660009134, 0.4977416087962963, 0.49785011574074073, 0.30885702363669554, 0.4826584201388889, 0.4988259548611111, 0.49675178433641975, 0.49644386574074073, 0.39502339040270074, 0.4023297646604938, 0.49820746527777776, 0.49866030092592595, 0.37723298134816596, 0.4085747010030864, 0.49476200810185184, 0.4110286458333333, 0.4982368827160494, 0.4979468074845679, 0.3945004258487798, 0.4981397087191358, 0.4111207561728395, 0.41407576195987655, 0.49836299189814814, 0.49879701967592593, 0.49657262731481483, 0.4954325810185185, 0.385109394128537, 0.3993800822859502, 0.3530282881573962, 0.2409824066035832, 0.47141203703703705, 0.3982424286265432, 0.49766541280864196, 0.49767361111111114, 0.4975952449845679, 0.410283589611279, 0.40473355516975307, 0.49778452932098766, 0.4979272762345679, 0.4960496238425926, 0.4959334008487654, 0.3917727725009562, 0.40164685480102374, 0.33959105079064417, 0.39959056712962965, 0.4946585648148148, 0.35071465553381104, 0.4983885513117284, 0.4970334201388889, 0.49577039930555555, 0.4958960262345679, 0.3987490354938272, 0.49785734953703703, 0.4987622974537037, 0.40437459550749283, 0.4943494405864198, 0.497905574845679, 0.40774281442901233, 0.49835624035493825, 0.49845775462962966, 0.49440007716049383, 0.41113642939814815, 0.49348644868827163, 0.41240644290123457, 0.38096476344533703, 0.4977370273919753, 0.49814019097222223, 0.49608772183641975, 0.3045434886284868, 0.3263674946731017, 0.396024787808642, 0.40118296682098764, 0.4980567611882716, 0.4964899209104938, 0.4970363136574074, 0.3931615543539697, 0.3848406789145279, 0.40627314814814813, 0.4973165027006173, 0.49566864390432097, 0.4838242669753086, 0.4981423611111111, 0.3462913878508734, 0.49369237075617284, 0.41111665702160494, 0.4982038483796296, 0.498365162037037, 0.40058232060185184, 0.4971141975308642, 0.4981030574845679, 0.49795524691358023, 0.49764708719135803, 0.4050067042231783, 0.4132785976080247, 0.3943688326820289, 0.3863092706141988, 0.49596764081790123, 0.49785300925925924, 0.4849679301697531, 0.4747485050154321, 0.3596140500566083, 0.43435305748456793, 0.31102564436790897, 0.3929511830253156, 0.498306568287037, 0.49782624421296295, 0.3983530977676397, 0.40503833912037035, 0.4961060474537037, 0.4074992766203704, 0.493778694058642, 0.49738450038580245, 0.498529369212963, 0.3686866273476872, 0.37150442853600196, 0.4986762152777778, 0.4134613715277778, 0.40606047453703703, 0.4979407793209877, 0.49823109567901236, 0.40413628472222224, 0.4011021894290123, 0.49584056712962965, 0.49623649691358024, 0.493833912037037, 0.49880714699074075, 0.38922985876853416, 0.3995777874228395, 0.49748963155864195, 0.4977131558641975, 0.4980473572530864, 0.4006057098765432, 0.41000337577160495, 0.4982749807098765, 0.4985177951388889, 0.49519941165123454, 0.38405832752122504, 0.35590221874201927, 0.4394401041666667, 0.497861930941358, 0.4896556712962963, 0.3511049470340006, 0.37020020601993137, 0.4975323109567901, 0.49816237461419755, 0.4965063175154321, 0.4083029513888889, 0.49867500964506173, 0.4987823109567901, 0.37370635307343614, 0.4015164448302469, 0.39966868893411395, 0.49410035686728393, 0.4957392939814815, 0.40972198109567903, 0.4109888599537037, 0.40887273341049385, 0.49772979359567904, 0.49847342785493826, 0.26567386459040815, 0.33315005684227406, 0.49935016396604937, 0.48218581211419753, 0.49895592206790124, 0.49610074266975307, 0.39941960841049384, 0.4028238065108527, 0.49786506558641974, 0.40864221643518517, 0.39616736790007206, 0.49613088348765433, 0.49712914737654323, 0.4985568576388889, 0.4074305555555556, 0.409800106095679, 0.4976810860339506, 0.4975882523148148, 0.3915505917517888, 0.39304277584876546, 0.4984326774691358, 0.49338951581790125, 0.4122774402006173, 0.40975453317901234, 0.41421489197530864, 0.4980046778549383, 0.49926432291666667, 0.49565996334876544, 0.3987478298611111, 0.35369214589132236, 0.24532060190662355, 0.3939296392746914, 0.4933347800925926, 0.48687909915123456, 0.40379650018277446, 0.4974283854166667, 0.4919965277777778, 0.49948398919753084, 0.3906489566678965, 0.3138367652604352, 0.40843629436728396, 0.41052107445987657, 0.49827570408950617, 0.49833839699074073, 0.40007643711419755, 0.396401668595679, 0.4955075713734568, 0.4967826485339506, 0.49867091049382717, 0.4984541377314815, 0.49605348186728393, 0.4976825327932099, 0.49403091242283953, 0.4121800250771605, 0.39129140919061683, 0.3941309405310308, 0.49743730709876544, 0.4975421971450617, 0.4980666473765432, 0.4949001736111111, 0.47800660686728397, 0.4591157889660494, 0.3617298714284749, 0.3889815450743136, 0.4985691550925926, 0.4972776813271605]
-print(len(mious_base_pupil))
-np_mious_pupil = np.array(mious_base_pupil)
-print(np.average(np_mious_pupil))
-    # base miou average is 0.4484484039157212
+BASELINE MODEL ON IRIS DETECTION
+print(test())
+    # pretrained miou average is 0.49442484884953003
 """

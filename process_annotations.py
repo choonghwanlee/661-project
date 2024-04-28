@@ -155,14 +155,24 @@ for filename in os.listdir(directory):
             make_image_mask(masks["pupil"][0], f"./masks/pupil/{name}_pupil.png")
 """
 
-directory = "json_files"
+directory = "label-4-json"
 
 for filename in os.listdir(directory):
     f = os.path.join(directory, filename)
     if os.path.isfile(f):
-        masks = get_masks(f"./{f}", ["iris", "pupil"])
+        masks = get_masks(f"./{f}", ["iris"])
         name = filename.split(".")[0]
         if "iris" in masks:
-            [make_image_mask(mask, f"./masks/iris/{name}_{index}_iris.png") for index, mask in enumerate(masks['iris'])]
-        if "pupil" in masks:
-            [make_image_mask(mask, f"./masks/pupil/{name}_{index}_pupil.png") for index, mask in enumerate(masks['pupil'])]
+            [make_image_mask(mask, f"./label-4/masks/{name}_iris.png") for index, mask in enumerate(masks['iris'])]
+        # if "pupil" in masks:
+        #     [make_image_mask(mask, f"./label-1/pupil/{name}_{index}_pupil.png") for index, mask in enumerate(masks['pupil'])]
+
+# directory = "label-2/images"
+
+# names = []
+# for filename in os.listdir(directory):
+#     f = os.path.join(directory, filename)
+#     if os.path.isfile(f) and filename != ".DS_Store":
+#         names.append(filename.split(".")[0])
+
+# print(names)
