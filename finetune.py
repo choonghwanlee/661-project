@@ -11,6 +11,7 @@ from torch.optim import Adam
 import torch.nn.functional as F
 from typing import Tuple
 import monai
+import math
 from tqdm import tqdm
 
 
@@ -53,7 +54,7 @@ class SAMDataset(TorchDataset):
 
         return inputs
 
-def fine_tune(images, pred_masks, mode='iris'):
+def fine_tune(images, pred_masks, model_save_ckpt, model_load_ckpt=None, base_model=None, mode='iris', num_epochs=4, batch_size=2):
     ## images: np array of images 
     ## pred_masks: np array of masks
     print('running fine-tuning')
@@ -64,9 +65,12 @@ def fine_tune(images, pred_masks, mode='iris'):
     dataset = SAMDataset(dataset=data_dic, processor=processor, transform= augmentations, task=mode)
     print('dataset initialized!')
     # Create a DataLoader instance for the training dataset
-    BATCH_SIZE = 2
-    train_dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=True, drop_last=False)
-    model = SamModel.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    train_dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=False)
+    model = base_model
+
+    if (model is None):
+        model = SamModel.from_pretrained("Zigeng/SlimSAM-uniform-50")
+        model.load_state_dict(torch.load(model_load_ckpt))
     print('loaded model!')
     # make sure we only compute gradients for mask decoder
     for name, param in model.named_parameters():
@@ -77,7 +81,6 @@ def fine_tune(images, pred_masks, mode='iris'):
     #Try DiceFocalLoss, FocalLoss, DiceCELoss
     seg_loss = monai.losses.FocalLoss(gamma=2.0, alpha=0.5)
     #Training loop
-    num_epochs = 4
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model.to(device)
     model.train()
@@ -114,13 +117,14 @@ def fine_tune(images, pred_masks, mode='iris'):
         print(f'Mean loss: {sum(epoch_losses)/len(epoch_losses)}')             
     # Save the model's state dictionary to a file
     print('done!')
-    torch.save(model.state_dict(), f"./models/{mode}_model_checkpoint.pth")
+    torch.save(model.state_dict(), model_save_ckpt)
+    return model
 
 def create_dataset(images, masks):
     # Convert the NumPy arrays to Pillow images and store them in a dictionary
     
     dataset_dict = {
-        "image": [Image.fromarray(img).filter(ImageFilter.GaussianBlur(radius = 3)) for img in images],
+        "image": [Image.fromarray(img).filter(ImageFilter.MedianFilter(size = 3)) for img in images],
         "label": [ImageOps.grayscale(Image.fromarray(mask)) for mask in masks],
     }
     # Create the dataset using the datasets.Dataset class
@@ -171,21 +175,72 @@ def postprocess_masks(masks: torch.Tensor, input_size: Tuple[int, ...], original
     masks = F.interpolate(masks, original_size, mode="bilinear", align_corners=False)
     return masks
 
+def _are_points_in_bounding_box(contour, bounding_box):
+    x, y, width, height = bounding_box
+    for point in contour:
+        px, py = point[0]  # point is in the form [[x, y]]
+        
+        if not (x <= px <= x + width and y <= py <= y + height):
+            return False
+    
+    return True
 
-def generate_eval(images, modelCheckpointFilePath, mode='iris'):
-    #make the predictions, then call compute_metrics
-    model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+
+
+def reduce_masks(sam_predictions):
+    frame_size = (1080, 1920)
+    proj_eye_center = (frame_size[0]/2, frame_size[1]/3)
+    proj_eye_radius = (0.25*frame_size[0], 0.07*frame_size[1])
+    y_start, y_end = int(proj_eye_center[1]-proj_eye_radius[1]), int(proj_eye_center[1]+proj_eye_radius[1])
+    x_start, x_end = int(proj_eye_center[0]-proj_eye_radius[0]), int(proj_eye_center[0]+proj_eye_radius[0])
+    rect = (x_start, y_start, x_end - x_start, y_end - y_start)
+    sam_pred_masks = [] ## your updated masks
+    
+    for pred_mask in sam_predictions: ## where sam_predictions are your model's output
+        max_area = -1
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7,7))
+        eroded_mask = cv2.erode(pred_mask, kernel, iterations=2) ## remove noise from model prediction
+        eroded_mask = cv2.morphologyEx(eroded_mask, cv2.MORPH_OPEN, kernel) ## remove noise from model prediction
+        iris_contours, _ = cv2.findContours(eroded_mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+        max_area = -1
+        iris_center, iris_radius = None, None 
+        for contour in iris_contours:
+            convex_closed = cv2.convexHull(contour, False)
+            perimeter = cv2.arcLength(convex_closed, True)
+            area = cv2.contourArea(convex_closed)
+            if perimeter == 0:
+                continue
+            circularity = (4*math.pi*area)/(perimeter*perimeter)
+            ## check the contour circularity is high, area is big, and all points are inside bounding_box
+            if circularity > 0.8 and area > max_area and _are_points_in_bounding_box(convex_closed, rect):
+                max_area = area
+                approx = cv2.approxPolyDP(convex_closed, perimeter * 0.034, True)
+                iris_center, iris_radius = cv2.minEnclosingCircle(approx)
+        filtered_mask = np.zeros((1920, 1080), dtype=np.uint8)
+        if iris_center:
+            cv2.circle(filtered_mask, (int(iris_center[0]),int(iris_center[1])), int(iris_radius), (255), -1)  
+            sam_pred_masks.append(filtered_mask)
+        else:
+            sam_pred_masks.append(eroded_mask)
+    return sam_pred_masks
+
+def generate_eval(images, modelCheckpointFilePath, mode='iris',model=None):
+    my_model=model
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if (my_model is None):
+        model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+
+        # Create an instance of the model architecture with the loaded configuration
+        my_model = SamModel(config=model_config)
+        #Update the model by loading the weights from saved file.
+        my_model.load_state_dict(torch.load(modelCheckpointFilePath))
+        
     processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
-
-    # Create an instance of the model architecture with the loaded configuration
-    my_model = SamModel(config=model_config)
-    #Update the model by loading the weights from saved file.
-    my_model.load_state_dict(torch.load(modelCheckpointFilePath))
     ## move to device
     device = "cuda" if torch.cuda.is_available() else "cpu"
     my_model = my_model.to(device)
     ## prepare prompt and input
-    augmented = [Image.fromarray(im).filter(ImageFilter.GaussianBlur(radius = 3)) for im in images]
+    augmented = [Image.fromarray(im).filter(ImageFilter.MedianFilter(size= 3)) for im in images]
     width, height = augmented[0].size
     prompt = get_bounding_box([width, height])
     segmentations = []
@@ -197,13 +252,49 @@ def generate_eval(images, modelCheckpointFilePath, mode='iris'):
             outputs = my_model(**inputs, multimask_output=False)
         predicted_masks = postprocess_masks(outputs.pred_masks.squeeze(1), inputs["reshaped_input_sizes"][0].tolist(), 
                                         inputs["original_sizes"][0].tolist(), processor.image_processor.pad_size).to(device)
+        
         # convert soft mask to hard mask
         seg_prob = torch.sigmoid(predicted_masks)
         seg_prob = seg_prob.cpu().numpy().squeeze()
-        seg = (seg_prob > 0.5).astype(np.uint8)
+        seg = (seg_prob > 0.6).astype(np.uint8)
         segmentations.append(seg)
+    segmentations = reduce_masks(segmentations)
     return segmentations
 
+def generate_eval_segprob(images, modelCheckpointFilePath, mode='iris',model=None):
+    my_model=model
+    if (my_model is None):
+        model_config = SamConfig.from_pretrained("Zigeng/SlimSAM-uniform-50")
+
+        # Create an instance of the model architecture with the loaded configuration
+        my_model = SamModel(config=model_config)
+        #Update the model by loading the weights from saved file.
+        my_model.load_state_dict(torch.load(modelCheckpointFilePath))
+        
+    processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    ## move to device
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    my_model = my_model.to(device)
+    ## prepare prompt and input
+    augmented = [Image.fromarray(im).filter(ImageFilter.MedianFilter(size = 3)) for im in images]
+    width, height = augmented[0].size
+    prompt = get_bounding_box([width, height])
+    seg_probs = []
+    for image in augmented:
+        inputs = processor(image, input_boxes=[[prompt]], return_tensors="pt").to(device)
+        ## generate eval – forward pass
+        my_model.eval()
+        with torch.no_grad():
+            outputs = my_model(**inputs, multimask_output=False)
+        predicted_masks = postprocess_masks(outputs.pred_masks.squeeze(1), inputs["reshaped_input_sizes"][0].tolist(), 
+                                        inputs["original_sizes"][0].tolist(), processor.image_processor.pad_size).to(device)
+        
+        # convert soft mask to hard mask
+        seg_prob = torch.sigmoid(predicted_masks)
+        seg_prob = seg_prob.cpu().numpy().squeeze()
+        seg = (seg_prob > 0.6).astype(np.uint8)
+        seg_probs.append(seg_prob)
+    return seg_probs
 
 """
 find fine_tune usage in naive_train.py
