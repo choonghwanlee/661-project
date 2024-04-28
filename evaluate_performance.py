@@ -5,7 +5,6 @@ import matplotlib.pyplot as plt
 import torch
 from torch import nn
 import numpy as np
-import evaluate
 from finetune import generate_eval
 from datasets import load_metric
 from transformers import SamConfig, SamProcessor, SamModel
@@ -49,7 +48,11 @@ def evaluate_on_images(images, true_masks, modelCheckpointFilePath):
         true_mask = np.reshape(true_mask, (1, true_mask.shape[0], true_mask.shape[1]))
         pred_mask =  np.reshape(predictions[image_index], (1, predictions[image_index].shape[0], predictions[image_index].shape[1]))
         metrics = compute_metrics(pred_mask, true_mask, metric=metric)
-        iou_vals[image_index] = metrics["mean_iou"]
+
+        intersection = np.logical_and(true_mask, pred_mask)
+        union = np.logical_or(true_mask, pred_mask)
+        iou = np.sum(intersection) / np.sum(union)
+        iou_vals[image_index] = iou
         
     return iou_vals
 
