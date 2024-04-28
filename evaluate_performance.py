@@ -27,6 +27,7 @@ def compute_metrics(predicted_masks, true_masks, metric):
         return metrics  
 
 def evaluate_on_images(images, true_masks, modelCheckpointFilePath):
+    print(f"modelCheckpoint: {modelCheckpointFilePath}")
     '''
     Parameters:
         -images a list of np arrays, where each entry in the list is the np array representation of an image

@@ -55,14 +55,17 @@ class SAMDataset(TorchDataset):
 
         return inputs
 
-def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelCheckpointFilePath = None, BATCH_SIZE=2, num_epochs=4):
+def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelCheckpointFilePath = None, BATCH_SIZE=2, num_epochs=8):
     ## images: np array of images 
     ## pred_masks: np array of masks
-    print('running fine-tuning')
+    print('running fine-tuning!!')
     data_dic = create_dataset(images, pred_masks)
     # Initialize the processor
     processor = SamProcessor.from_pretrained("Zigeng/SlimSAM-uniform-50")
+    # augmentations = transforms.Compose([transforms.RandomCrop((1920, 1080)), transforms.RandomHorizontalFlip(0.5), transforms.ColorJitter(brightness=0.2), transforms.RandomAffine(degrees = 0, translate = (0.2, 0.2))])
     augmentations = transforms.Compose([transforms.RandomHorizontalFlip(0.5), transforms.ColorJitter(brightness=0.2)])
+    # dataset = SAMDataset(dataset=data_dic, processor=processor, task=mode)
+
     dataset = SAMDataset(dataset=data_dic, processor=processor, transform= augmentations, task=mode)
     print('dataset initialized!')
     # Create a DataLoader instance for the training dataset
@@ -74,6 +77,7 @@ def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelChec
         # Create an instance of the model architecture with the loaded configuration
         model = SamModel(config=model_config)
         #Update the model by loading the weights from saved file.
+        print(f"loading model from {modelCheckpointFilePath}!")
         model.load_state_dict(torch.load(modelCheckpointFilePath))
     print('loaded model!')
     # make sure we only compute gradients for mask decoder
@@ -81,7 +85,8 @@ def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelChec
         if name.startswith("vision_encoder") or name.startswith("prompt_encoder"):
             param.requires_grad_(False)
     # Initialize the optimizer and the loss function
-    optimizer = Adam(model.mask_decoder.parameters(), lr=0.001, weight_decay=1e-4)
+    lr = 0.001
+    optimizer = Adam(model.mask_decoder.parameters(), lr=lr, weight_decay=1e-4)
     #Try DiceFocalLoss, FocalLoss, DiceCELoss
     seg_loss = monai.losses.FocalLoss(gamma=2.0, alpha=0.5)
     #Training loop
@@ -90,8 +95,14 @@ def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelChec
     model.train()
     print('starting fine tuning!')
     start_time = time.time()
+    best_loss = 1
     for epoch in range(num_epochs):
         print(f'EPOCH: {epoch}')
+        if epoch % 4 == 0 and epoch != 0:
+            lr *= 0.5
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+            print(f"decreased lr to {lr}")
         epoch_losses = []
         for batch in tqdm(train_dataloader):
         # forward pass
@@ -118,11 +129,18 @@ def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelChec
             optimizer.step()
             epoch_losses.append(loss.item())
         
-        print(f'Mean loss: {sum(epoch_losses)/len(epoch_losses)}')             
+        mean_loss = sum(epoch_losses)/len(epoch_losses)
+        print(f'Mean loss: {mean_loss}')
+        if mean_loss < best_loss:
+            print("saving model!")
+            best_loss = mean_loss
+            torch.save(model.state_dict(), f"./models/{checkpoint_info}_{mode}_model_checkpoint.pth")
     # Save the model's state dictionary to a file
     print('done!')
     end_time = time.time() - start_time
-    torch.save(model.state_dict(), f"./models/{checkpoint_info}_{mode}_model_checkpoint.pth")
+    if best_loss == 1:
+        print("saving last one")
+        torch.save(model.state_dict(), f"./models/{checkpoint_info}_{mode}_model_checkpoint.pth")
     return end_time
 
 def create_dataset(images, masks):
@@ -308,3 +326,4 @@ def generate_eval_segprob(images, modelCheckpointFilePath, mode='iris',model=Non
 """
 find fine_tune usage in naive_train.py
 """
+>>>>>>> main
