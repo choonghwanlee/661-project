@@ -55,7 +55,7 @@ class SAMDataset(TorchDataset):
 
         return inputs
 
-def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelCheckpointFilePath = None, BATCH_SIZE=2, num_epochs=8):
+def fine_tune(images, pred_masks, mode='iris', checkpoint_info='base', modelCheckpointFilePath = None, BATCH_SIZE=2, num_epochs=4):
     ## images: np array of images 
     ## pred_masks: np array of masks
     print('running fine-tuning!!')
