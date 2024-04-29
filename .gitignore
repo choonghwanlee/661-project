@@ -11,3 +11,5 @@ images/
 test_images/
 __pycache__
 models/
+train/
+train.zip
